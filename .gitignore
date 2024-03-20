@@ -1,0 +1,4 @@
+outputs/*
+*.pyc
+assistgs.egg-info/*
+build/*

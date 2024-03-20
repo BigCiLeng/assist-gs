@@ -1,0 +1,24 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "train assistgs",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "/data/luoly/wangn/nerfstudio/nerfstudio/scripts/train.py",
+      "console": "integratedTerminal",
+      "cwd": "/data/luoly/wangn/assist-gs",
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "7"
+      },
+      "args": [
+        "assistgs",
+        "--data",
+        "/data/luoly/dataset/assist/530_scannet_table0_copy"
+      ]
+    }
+  ]
+}
