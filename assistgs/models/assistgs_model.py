@@ -345,7 +345,7 @@ class AssistGSModel(Model):
         
         gauss_params = {}
         for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
-            gauss_params[p] = dict[f"background_model.{p}"]
+            gauss_params[p] = dict[f"background_model.gauss_params.{p}"]
         self.background_model.load_state_dict(gauss_params, **kwargs)
 
         for object_id in range(1, self.num_objects + 1):
@@ -353,7 +353,7 @@ class AssistGSModel(Model):
             object_model = self.object_models[object_model_name]
             gauss_params = {}
             for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
-                gauss_params[p] = dict[f"{object_model_name}.{p}"]
+                gauss_params[p] = dict[f"object_models.{object_model_name}.gauss_params.{p}"]
             object_model.load_state_dict(gauss_params, **kwargs)
 
 
