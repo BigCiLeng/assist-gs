@@ -22,26 +22,24 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type, Union
 from jaxtyping import Float
 from torch import Tensor
-from nerfstudio.data.scene_box import OrientedBox
 
 import torch
 from torch.nn import Parameter
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
-from nerfstudio.cameras.cameras import Cameras
 from gsplat._torch_impl import quat_to_rotmat
 from gsplat.project_gaussians import project_gaussians
 from gsplat.rasterize import rasterize_gaussians
 from gsplat.sh import num_sh_bases, spherical_harmonics
+import math
+import numpy as np
+from pytorch_msssim import SSIM
+from typing_extensions import Literal
+from nerfstudio.data.scene_box import OrientedBox
+from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes, TrainingCallbackLocation
 from nerfstudio.engine.optimizers import Optimizers
 from nerfstudio.models.base_model import Model, ModelConfig
-import math
-import numpy as np
-
-from pytorch_msssim import SSIM
-from typing_extensions import Literal
 # need following import for background color override
 from nerfstudio.model_components import renderers
 from nerfstudio.utils.colors import get_color
@@ -182,9 +180,9 @@ class AssistGSModel(Model):
         self.num_objects = self.object_meta.shape[0]
         
         for object_id in range(1, self.num_objects + 1):
-            R = torch.eye(3)
             T = self.object_meta[object_id-1, 0:3]
             S = self.object_meta[object_id-1, 3:6]
+            R = self.object_meta[object_id-1, 6:15].reshape([3, 3])
             object_bbox = OrientedBox(R, T, S)
             # process seed_pts
             object_seed_pts = None
@@ -355,6 +353,8 @@ class AssistGSModel(Model):
             for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
                 gauss_params[p] = dict[f"object_models.{object_model_name}.gauss_params.{p}"]
             object_model.load_state_dict(gauss_params, **kwargs)
+            
+        self.set_all_gaussians()
 
 
     def remove_from_optim(self, optimizer, deleted_mask, new_params):

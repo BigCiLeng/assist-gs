@@ -32,6 +32,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     get_train_eval_split_fraction,
     get_train_eval_split_interval,
 )
+from assistgs.utils.get_aabb import get_aabb
 MAX_AUTO_RESOLUTION = 1600
 
 @dataclass
@@ -72,6 +73,7 @@ class AssistGSDataParserConfig(DataParserConfig):
     """Replace the unknown pixels with this color. Relevant if you have a mask but still sample everywhere."""
     load_3D_points: bool = True
     """Whether to load the 3D points from the colmap reconstruction."""
+    points_to_load: Literal["sparse", "dense"] = "sparse"
     
     box_scale: float = 1.0
     """Maximum scale for bboxes to include shadows"""
@@ -93,7 +95,7 @@ class AssistGSDataParser(DataParser):
 
     def _generate_dataparser_outputs(self, split: str = "train"):
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
-
+        get_aabb(self.config.data)
         if self.config.data.suffix == ".json":
             meta = load_from_json(self.config.data)
             data_dir = self.config.data.parent
@@ -346,7 +348,10 @@ class AssistGSDataParser(DataParser):
         # Load 3D points
         if self.config.load_3D_points:
             if "ply_file_path" in meta:
-                ply_file_path = data_dir / meta["ply_file_path"]
+                if self.config.points_to_load == "dense":
+                    ply_file_path = data_dir / "dense_pc.ply"
+                else:
+                    ply_file_path = data_dir / "sparse_pc.ply"
 
             elif colmap_path.exists():
                 from rich.prompt import Confirm
@@ -420,7 +425,7 @@ class AssistGSDataParser(DataParser):
             scale_factor: float, 
             #downscale_factor: float
         ):
-        # info[i]: [x, y, z, h, w, l, class_id, instance_id (i+1)]
+        # info[i]: [x, y, z, h, w, l, R(9), instance_id (i+1)]
         infos_path = self.config.data / "bboxs_aabb.npy"
         infos = np.load(infos_path.as_posix())  
         # apply transform_matrix to infos
@@ -428,14 +433,19 @@ class AssistGSDataParser(DataParser):
         infos_homo = np.concatenate(
             [infos[:, :3], np.ones([infos.shape[0], 1])], axis=-1
         )
-        infos[:, :3] = np.matmul(transform_matrix, infos_homo.T).T
+        infos_homo = np.zeros([infos.shape[0], 4, 4])
+        infos_homo[:, :3, :3] = infos[:, 6:15].reshape([infos.shape[0], 3, 3])
+        infos_homo[:, :3, 3] = infos[:, :3].reshape([infos.shape[0], 3])
+        infos_homo[:, 3, 3] = 1.0
+        transformed_infos = np.matmul(transform_matrix, infos_homo)
+        infos[:, :3] = transformed_infos[:, :3, 3]
         infos[:, :6] *= scale_factor
+        infos[:, 6:15] = transformed_infos[:, :3, :3].reshape([infos.shape[0], 9])
 
         box_scale = self.config.box_scale
         infos[:, 3:6] *= box_scale
-        infos[:, 6] = 0.
 
-        object_list = np.array(infos[:, 7], dtype=np.float32)
+        object_list = np.array(infos[:, 15], dtype=np.float32)
 
         object_meta = torch.tensor(infos, dtype=torch.float32)
 

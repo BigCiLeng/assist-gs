@@ -15,9 +15,15 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+import pypose as pp
+import numpy as np
+from collections import OrderedDict
 from torch.nn import Parameter
 from torch.nn.parallel import DistributedDataParallel as DDP
 from typing_extensions import Literal
+from nerfstudio.utils.rich_utils import CONSOLE
+import viser
+from nerfstudio.data.scene_box import SceneBox
 
 from nerfstudio.data.datamanagers.base_datamanager import (
     DataManager,
@@ -30,7 +36,8 @@ from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttrib
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig, Pipeline
 from nerfstudio.utils import profiler
-
+from nerfstudio.viewer.viewer_elements import *
+from nerfstudio.viewer.viewer import VISER_NERFSTUDIO_SCALE_RATIO
 from assistgs.data.assistgs_datamanger import AssistDataManagerConfig
 
 @dataclass
@@ -109,11 +116,153 @@ class AssistPipeline(Pipeline):
             self._model = typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True))
             dist.barrier(device_ids=[local_rank])
 
+        self.viewer_control = ViewerControl()
+        self.show_obj_bbox = ViewerCheckbox(name="Show all objects' bounding boxes", default_value=False, cb_hook = self._show_obj_bbox)
+        self.export_options = ViewerDropdown(name="Export options", default_value="objects", options=["scene", "objects"])
+        self.export_assistgs: ViewerButton = ViewerButton(
+            name="export gs model", cb_hook=self._export_assistgs
+        )
+        
     @property
     def device(self):
         """Returns the device that the model is on."""
         return self.model.device
+    
+    def write_ply(self, filename: str, count: int, map_to_tensors: OrderedDict[str, np.ndarray]):
 
+        # Ensure count matches the length of all tensors
+        if not all(len(tensor) == count for tensor in map_to_tensors.values()):
+            raise ValueError("Count does not match the length of all tensors")
+
+        # Type check for numpy arrays of type float and non-empty
+        if not all(
+            isinstance(tensor, np.ndarray) and tensor.dtype.kind in ["f", "d"] and tensor.size > 0
+            for tensor in map_to_tensors.values()
+        ):
+            raise ValueError("All tensors must be numpy arrays of float type and not empty")
+
+        with open(filename, "wb") as ply_file:
+            # Write PLY header
+            ply_file.write(b"ply\n")
+            ply_file.write(b"format binary_little_endian 1.0\n")
+
+            ply_file.write(f"element vertex {count}\n".encode())
+
+            # Write properties, in order due to OrderedDict
+            for key in map_to_tensors.keys():
+                ply_file.write(f"property float {key}\n".encode())
+
+            ply_file.write(b"end_header\n")
+
+            # Write binary data
+            # Note: If this is a perfromance bottleneck consider using numpy.hstack for efficiency improvement
+            for i in range(count):
+                for tensor in map_to_tensors.values():
+                    value = tensor[i]
+                    ply_file.write(np.float32(value).tobytes())
+    
+    def export_model_to_dict(self, model):
+        with torch.no_grad():
+            map_to_tensors = OrderedDict()
+            positions = model.means.cpu().numpy()
+            count = positions.shape[0]
+            n = count
+            map_to_tensors["x"] = positions[:, 0]
+            map_to_tensors["y"] = positions[:, 1]
+            map_to_tensors["z"] = positions[:, 2]
+            map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
+
+            if model.config.sh_degree > 0:
+                shs_0 = model.shs_0.contiguous().cpu().numpy()
+                for i in range(shs_0.shape[1]):
+                    map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None]
+
+                # transpose(1, 2) was needed to match the sh order in Inria version
+                shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
+                shs_rest = shs_rest.reshape((n, -1))
+                for i in range(shs_rest.shape[-1]):
+                    map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None]
+            else:
+                colors = torch.clamp(model.colors.clone(), 0.0, 1.0).data.cpu().numpy()
+                map_to_tensors["colors"] = (colors * 255).astype(np.uint8)
+
+            map_to_tensors["opacity"] = model.opacities.data.cpu().numpy()
+
+            scales = model.scales.data.cpu().numpy()
+            for i in range(3):
+                map_to_tensors[f"scale_{i}"] = scales[:, i, None]
+
+            quats = model.quats.data.cpu().numpy()
+            for i in range(4):
+                map_to_tensors[f"rot_{i}"] = quats[:, i, None]
+
+            # post optimization, it is possible have NaN/Inf values in some attributes
+            # to ensure the exported ply file has finite values, we enforce finite filters.
+            select = np.ones(n, dtype=bool)
+            for k, t in map_to_tensors.items():
+                n_before = np.sum(select)
+                select = np.logical_and(select, np.isfinite(t).all())
+                n_after = np.sum(select)
+                if n_after < n_before:
+                    CONSOLE.print(f"{n_before - n_after} NaN/Inf elements in {k}")
+
+            if np.sum(select) < n:
+                CONSOLE.print(f"values have NaN/Inf in map_to_tensors, only export {np.sum(select)}/{n}")
+                for k, t in map_to_tensors.items():
+                    map_to_tensors[k] = map_to_tensors[k][select, :]
+        return map_to_tensors, count
+    def _export_assistgs(
+        self, 
+        button: ViewerButton,
+    ):
+        self.viewer_control.viser_server.add_gui_markdown("<small>Generate ply export of Gaussian Splat</small>")
+        output_directory = self.viewer_control.viser_server.add_gui_text("Output Directory", initial_value="exports/splat/")
+        generate_command = self.viewer_control.viser_server.add_gui_button("Export", icon=viser.Icon.TERMINAL_2)
+        
+        @generate_command.on_click
+        def _(event: viser.GuiEvent) -> None:
+            assert event.client is not None
+            if self.export_options.value == "scene":
+                map_to_tensors, count = self.export_model_to_dict(self.model)
+                self.write_ply(output_directory.value+"scene.ply", count, map_to_tensors)
+            else:
+                map_to_tensors, count = self.export_model_to_dict(self.model.background_model)
+                self.write_ply(output_directory.value+"background_model.ply", count, map_to_tensors)
+                for object_id in range(1, self.model.num_objects + 1):
+                    object_model_name = f"object_{int(object_id)}"
+                    object_model = self.model.object_models[object_model_name]
+                    map_to_tensors, count = self.export_model_to_dict(object_model)
+                    self.write_ply(output_directory.value + object_model_name + ".ply", count, map_to_tensors)
+
+
+    def _show_obj_bbox(self, checkbox: ViewerCheckbox):
+        if checkbox.value:
+            self._box_handle = {}
+            for object_id in range(1, self.model.num_objects + 1):
+                object_model_name = f"object_{int(object_id)}"
+                if object_model_name in self._box_handle:
+                    self._box_handle[object_model_name].visible = True
+                else:
+                    bbox = self.model.object_models[object_model_name].scene_box
+                    T = bbox.T * VISER_NERFSTUDIO_SCALE_RATIO
+                    S = bbox.S * VISER_NERFSTUDIO_SCALE_RATIO
+                    R = bbox.R
+                    qx, qy, qz, qw = pp.mat2SO3(R)
+                    self._box_handle[object_model_name] = self.viewer_control.viser_server.add_box(
+                        name = object_model_name,
+                        color = (250, 0, 0),
+                        dimensions = S,
+                        wxyz = (qw, qx, qy, qz),
+                        position = T,
+                        visible = True
+                    )                
+        else:
+            for object_id in range(1, self.model.num_objects + 1):
+                object_model_name = f"object_{int(object_id)}"
+                self._box_handle[object_model_name].visible = False
+            
     @profiler.time_function
     def get_train_loss_dict(self, step: int):
         """This function gets your training loss dict. This will be responsible for
