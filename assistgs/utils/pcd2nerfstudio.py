@@ -11,11 +11,14 @@ def create_ply_from_colmap(pcd, applied_transform=None):
         recon_dir: Directory to grab colmap points
         output_dir: Directory to output .ply
     """
-    applied_transform = torch.tensor([[0.0,1.0,0.0,0.0],
-                                      [1.0,0.0,0.0,0.0],
-                                      [-0.0,-0.0,-1.0,-0.0]
-                                      ])
-    
+    # applied_transform = torch.tensor([[0.0,1.0,0.0,0.0],
+    #                                   [1.0,0.0,0.0,0.0],
+    #                                   [-0.0,-0.0,-1.0,-0.0]
+    #                                   ])
+    applied_transform = torch.tensor([[1.0,0.0,0.0,0.0],
+                                      [0.0,0.0,1.0,0.0],
+                                      [-0.0,-1.0,-0.0,-0.0]
+                                    ])
     # Load point Positions
     points3D = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
     if applied_transform is not None:
@@ -28,17 +31,17 @@ def create_ply_from_colmap(pcd, applied_transform=None):
     return pcd
 
 def colmap_test():
-    # root_dir = Path("/data/luoly/dataset/assist/530_scannet_table0_copy/models/point_cloud")
-    # colmap_pcd_dir = root_dir / "colmap"
-    # files = colmap_pcd_dir.glob("*.ply")
-    # for file in tqdm(files):
-    #     pcd = o3d.io.read_point_cloud(str(file))
-    #     pcd = colmapPcd2nerfstudio(pcd)
-    #     o3d.io.write_point_cloud(str(root_dir / file.name), pcd)
-    file = "/data/luoly/dataset/assist/530_scannet_table0_copy/colmap_dense_pc.ply"
-    pcd = o3d.io.read_point_cloud(str(file))
-    pcd = create_ply_from_colmap(pcd)
-    o3d.io.write_point_cloud("/data/luoly/dataset/assist/530_scannet_table0_copy/dense_pc.ply", pcd)
+    root_dir = Path("/data/luoly/dataset/assist/530_scannet_table0_copy/models/point_cloud")
+    colmap_pcd_dir = root_dir / "colmap"
+    files = colmap_pcd_dir.glob("*.ply")
+    for file in tqdm(files):
+        pcd = o3d.io.read_point_cloud(str(file))
+        pcd = create_ply_from_colmap(pcd)
+        o3d.io.write_point_cloud(str(root_dir / file.name), pcd)
+    # file = "/data/luoly/dataset/assist/530_scannet_table0_copy/colmap_dense_pc.ply"
+    # pcd = o3d.io.read_point_cloud(str(file))
+    # pcd = create_ply_from_colmap(pcd)
+    # o3d.io.write_point_cloud("/data/luoly/dataset/assist/530_scannet_table0_copy/dense_pc.ply", pcd)
 
 if __name__ == "__main__":
     colmap_test()
