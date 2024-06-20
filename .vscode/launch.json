@@ -8,16 +8,17 @@
       "name": "train assistgs",
       "type": "debugpy",
       "request": "launch",
-      "program": "/data/luoly/wangn/nerfstudio/nerfstudio/scripts/train.py",
+      "python": "/home/bcl/.conda/envs/assist-gs/bin/python",
+      "program": "/home/mi/workspace/wangn/code/nerfstudio/nerfstudio/scripts/train.py",
       "console": "integratedTerminal",
-      "cwd": "/data/luoly/wangn/assist-gs",
+      "cwd": "/home/mi/workspace/wangn/code/assist-gs",
       "env": {
-        "CUDA_VISIBLE_DEVICES": "7"
+        "CUDA_VISIBLE_DEVICES": "0"
       },
       "args": [
         "assistgs",
         "--data",
-        "/data/luoly/dataset/assist/530_scannet_table0_copy"
+        "/home/mi/workspace/wangn/datasets/coffee_cup/data/20240617/refine_data",
       ]
     }
   ]

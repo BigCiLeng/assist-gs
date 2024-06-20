@@ -32,7 +32,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     get_train_eval_split_fraction,
     get_train_eval_split_interval,
 )
-from assistgs.utils.get_aabb import get_aabb
+import pypose as pp
 MAX_AUTO_RESOLUTION = 1600
 
 @dataclass
@@ -75,7 +75,7 @@ class AssistGSDataParserConfig(DataParserConfig):
     """Whether to load the 3D points from the colmap reconstruction."""
     points_to_load: Literal["sparse", "dense"] = "sparse"
     
-    box_scale: float = 1.0
+    box_scale: float = 1.5
     """Maximum scale for bboxes to include shadows"""
     max_input_objects: int = -1
     """Max number of object poses considered by the network, will be set automatically"""
@@ -95,7 +95,6 @@ class AssistGSDataParser(DataParser):
 
     def _generate_dataparser_outputs(self, split: str = "train"):
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
-        get_aabb(self.config.data)
         if self.config.data.suffix == ".json":
             meta = load_from_json(self.config.data)
             data_dir = self.config.data.parent
@@ -450,6 +449,44 @@ class AssistGSDataParser(DataParser):
         object_meta = torch.tensor(infos, dtype=torch.float32)
 
         return object_meta, object_list
+    
+    # def _get_object_meta(
+    #         self, 
+    #         transform_matrix: torch.Tensor, 
+    #         scale_factor: float, 
+    #         #downscale_factor: float
+    #     ):
+    #     # info[i]: [x, y, z, h, w, l, R(9), instance_id (i+1)]
+    #     infos_path = self.config.data / "bboxs_aabb.npy"
+    #     infos = np.load(infos_path.as_posix())  
+    #     # apply transform_matrix to infos
+    #     transform_matrix = transform_matrix.numpy()
+    #     infos_homo = np.concatenate(
+    #         [infos[:, :3], np.ones([infos.shape[0], 1])], axis=-1
+    #     )
+
+    #     rot_euler = infos[:, 6:9]
+    #     R = pp.euler2SO3(rot_euler).matrix()
+    #     infos_homo = np.zeros([infos.shape[0], 4, 4])
+    #     infos_homo[:, :3, :3] = R
+    #     infos_homo[:, :3, 3] = infos[:, :3].reshape([infos.shape[0], 3])
+    #     infos_homo[:, 3, 3] = 1.0
+    #     transformed_infos = np.matmul(transform_matrix, infos_homo)
+
+    #     new_infos = np.zeros([infos.shape[0], 16])
+    #     new_infos[:, :3] = transformed_infos[:, :3, 3]
+    #     new_infos[:, :6] = infos[:, :6] * scale_factor
+    #     new_infos[:, 6:15] = transformed_infos[:, :3, :3].reshape([infos.shape[0], 9])
+    #     new_infos[:, 15] = infos[:, 9]
+
+    #     box_scale = self.config.box_scale
+    #     new_infos[:, 3:6] *= box_scale
+
+    #     object_list = np.array(new_infos[:, 15], dtype=np.float32)
+
+    #     object_meta = torch.tensor(new_infos, dtype=torch.float32)
+
+    #     return object_meta, object_list
 
     def _load_3D_points(self, ply_file_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
         """Loads point clouds positions and colors from .ply

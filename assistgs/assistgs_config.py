@@ -32,7 +32,7 @@ assistgs = MethodSpecification(
             datamanager=AssistDataManagerConfig(
                 dataparser=AssistGSDataParserConfig(
                     load_3D_points=True,
-                    points_to_load="dense",
+                    points_to_load="sparse",
                 ),
             ),
             model=AssistGSModelConfig(

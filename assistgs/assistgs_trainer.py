@@ -66,6 +66,8 @@ class AssistTrainer(Trainer):
 
     def __init__(self, config: AssistTrainerConfig, local_rank: int = 0, world_size: int = 1) -> None:        
         super().__init__(config, local_rank, world_size)
+        from assistgs.utils.get_aabb import get_aabb
+        get_aabb(self.config.data)
         object_infos_path = self.config.data / "bboxs_aabb.npy"
         object_infos = np.load(object_infos_path.as_posix())
         num_objects = object_infos.shape[0]

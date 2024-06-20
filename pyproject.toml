@@ -16,7 +16,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "nerfstudio"
+    "nerfstudio",
+    "pypose",
 ]
 
 [tool.setuptools.packages.find]

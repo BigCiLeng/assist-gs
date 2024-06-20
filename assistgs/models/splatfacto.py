@@ -25,10 +25,8 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
-from gsplat._torch_impl import quat_to_rotmat
-from gsplat.project_gaussians import project_gaussians
-from gsplat.rasterize import rasterize_gaussians
-from gsplat.sh import num_sh_bases, spherical_harmonics
+from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
+from gsplat.cuda_legacy._wrapper import project_gaussians, rasterize_gaussians, num_sh_bases, spherical_harmonics
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
 from typing_extensions import Literal

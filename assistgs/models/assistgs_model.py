@@ -27,10 +27,8 @@ import torch
 from torch.nn import Parameter
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from gsplat._torch_impl import quat_to_rotmat
-from gsplat.project_gaussians import project_gaussians
-from gsplat.rasterize import rasterize_gaussians
-from gsplat.sh import num_sh_bases, spherical_harmonics
+from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
+from gsplat.cuda_legacy._wrapper import project_gaussians, rasterize_gaussians, num_sh_bases, spherical_harmonics
 import math
 import numpy as np
 from pytorch_msssim import SSIM
@@ -924,7 +922,7 @@ class AssistGSModel(Model):
             1,
             quats_crop / quats_crop.norm(dim=-1, keepdim=True),
             viewmat.squeeze()[:3, :],
-            projmat.squeeze() @ viewmat.squeeze(),
+            # projmat.squeeze() @ viewmat.squeeze(),
             camera.fx.item(),
             camera.fy.item(),
             cx,
@@ -932,6 +930,7 @@ class AssistGSModel(Model):
             H,
             W,
             BLOCK_WIDTH,
+            0.01,
         )  # type: ignore
         
         # rescale the camera back to original dimensions before returning
@@ -1139,7 +1138,7 @@ class AssistGSModel(Model):
             1,
             quats_crop / quats_crop.norm(dim=-1, keepdim=True),
             viewmat.squeeze()[:3, :],
-            projmat.squeeze() @ viewmat.squeeze(),
+            # projmat.squeeze() @ viewmat.squeeze(),
             camera.fx.item(),
             camera.fy.item(),
             cx,
@@ -1147,6 +1146,7 @@ class AssistGSModel(Model):
             H,
             W,
             BLOCK_WIDTH,
+            0.01,
         )  # type: ignore
 
         if (radii).sum() == 0:
@@ -1211,7 +1211,7 @@ class AssistGSModel(Model):
         Args:
             image: tensor.Tensor in type uint8 or float32
         """
-        gt_img = self._downscale_if_required(image)
+        gt_img = self._downscale_if_required(image[..., None])
         return gt_img.to(self.device)
 
     def composite_with_background(self, image, background) -> torch.Tensor:
