@@ -418,7 +418,7 @@ class AssistGSDataParser(DataParser):
         )
         return dataparser_outputs
     
-    def _get_object_meta(
+    def _get_object_meta_matrix(
             self, 
             transform_matrix: torch.Tensor, 
             scale_factor: float, 
@@ -450,43 +450,45 @@ class AssistGSDataParser(DataParser):
 
         return object_meta, object_list
     
-    # def _get_object_meta(
-    #         self, 
-    #         transform_matrix: torch.Tensor, 
-    #         scale_factor: float, 
-    #         #downscale_factor: float
-    #     ):
-    #     # info[i]: [x, y, z, h, w, l, R(9), instance_id (i+1)]
-    #     infos_path = self.config.data / "bboxs_aabb.npy"
-    #     infos = np.load(infos_path.as_posix())  
-    #     # apply transform_matrix to infos
-    #     transform_matrix = transform_matrix.numpy()
-    #     infos_homo = np.concatenate(
-    #         [infos[:, :3], np.ones([infos.shape[0], 1])], axis=-1
-    #     )
+    def _get_object_meta_euler(
+            self, 
+            transform_matrix: torch.Tensor, 
+            scale_factor: float, 
+            #downscale_factor: float
+        ):
+        # info[i]: [x, y, z, h, w, l, R(9), instance_id (i+1)]
+        infos_path = self.config.data / "bboxs_aabb.npy"
+        infos = np.load(infos_path.as_posix())  
+        # apply transform_matrix to infos
+        transform_matrix = transform_matrix.numpy()
+        infos_homo = np.concatenate(
+            [infos[:, :3], np.ones([infos.shape[0], 1])], axis=-1
+        )
 
-    #     rot_euler = infos[:, 6:9]
-    #     R = pp.euler2SO3(rot_euler).matrix()
-    #     infos_homo = np.zeros([infos.shape[0], 4, 4])
-    #     infos_homo[:, :3, :3] = R
-    #     infos_homo[:, :3, 3] = infos[:, :3].reshape([infos.shape[0], 3])
-    #     infos_homo[:, 3, 3] = 1.0
-    #     transformed_infos = np.matmul(transform_matrix, infos_homo)
+        rot_euler = infos[:, 6:9]
+        R = pp.euler2SO3(rot_euler).matrix()
+        infos_homo = np.zeros([infos.shape[0], 4, 4])
+        infos_homo[:, :3, :3] = R
+        infos_homo[:, :3, 3] = infos[:, :3].reshape([infos.shape[0], 3])
+        infos_homo[:, 3, 3] = 1.0
+        transformed_infos = np.matmul(transform_matrix, infos_homo)
 
-    #     new_infos = np.zeros([infos.shape[0], 16])
-    #     new_infos[:, :3] = transformed_infos[:, :3, 3]
-    #     new_infos[:, :6] = infos[:, :6] * scale_factor
-    #     new_infos[:, 6:15] = transformed_infos[:, :3, :3].reshape([infos.shape[0], 9])
-    #     new_infos[:, 15] = infos[:, 9]
+        new_infos = np.zeros([infos.shape[0], 16])
+        new_infos[:, :6] = infos[:, :6]
+        new_infos[:, 15] = infos[:, 9]
+        
+        new_infos[:, :3] = transformed_infos[:, :3, 3]
+        new_infos[:, :6] = new_infos[:, :6] * scale_factor
+        new_infos[:, 6:15] = transformed_infos[:, :3, :3].reshape([infos.shape[0], 9])
 
-    #     box_scale = self.config.box_scale
-    #     new_infos[:, 3:6] *= box_scale
+        box_scale = self.config.box_scale
+        new_infos[:, 3:6] *= box_scale
 
-    #     object_list = np.array(new_infos[:, 15], dtype=np.float32)
+        object_list = np.array(new_infos[:, 15], dtype=np.float32)
 
-    #     object_meta = torch.tensor(new_infos, dtype=torch.float32)
+        object_meta = torch.tensor(new_infos, dtype=torch.float32)
 
-    #     return object_meta, object_list
+        return object_meta, object_list
 
     def _load_3D_points(self, ply_file_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
         """Loads point clouds positions and colors from .ply
