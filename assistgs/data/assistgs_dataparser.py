@@ -333,7 +333,7 @@ class AssistGSDataParser(DataParser):
             applied_scale = float(meta["applied_scale"])
             scale_factor *= applied_scale
 
-        object_meta, object_list = self._get_object_meta(transform_matrix, scale_factor)
+        object_meta, object_list = self._get_object_meta_euler(transform_matrix, scale_factor)
         
         # reinitialize metadata for dataparser_outputs
         metadata = {}

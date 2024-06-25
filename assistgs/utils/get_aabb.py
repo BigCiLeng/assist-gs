@@ -25,7 +25,7 @@ def get_aabb_matrix(file_dir: Path = Path("/data/luoly/dataset/assist/530_scanne
         pcd = o3d.io.read_point_cloud(str(file))
         if is_colmap_pcd:
             pcd = create_ply_from_colmap(pcd)
-        aabb = pcd.get_minimal_oriented_bounding_box()
+        aabb = pcd.get_oriented_bounding_box()
         xyz = np.asarray(aabb.center, dtype=np.float32)
         hwl = np.asarray(aabb.extent, dtype=np.float32)
         rotation = np.asarray(aabb.R, dtype=np.float32).flatten()

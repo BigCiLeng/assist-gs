@@ -66,7 +66,7 @@ SEMANTIC_COLOR_LIST = [
 ]
 SEMANTIC_COLOR_LIST = np.array(SEMANTIC_COLOR_LIST, dtype=np.uint8)
 SEMANTIC_COLOR_LIST = torch.tensor(SEMANTIC_COLOR_LIST).float().to("cuda:0")
-
+GAUSS_PARAMS_LIST = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
 
 @dataclass
 class AssistGSModelConfig(ModelConfig):
@@ -334,13 +334,36 @@ class AssistGSModel(Model):
         opacities_all = torch.cat(opacities_all, dim=0)
         return opacities_all
 
+    def reset_assistgs_model(self):
+        self.set_all_gaussians()
+        background_mask = torch.ones(len(self.gauss_params["means"]), dtype=torch.bool)
+        for object_id in range(1, self.num_objects + 1):
+            T = self.object_meta[object_id-1, 0:3]
+            S = self.object_meta[object_id-1, 3:6]
+            R = self.object_meta[object_id-1, 6:15].reshape([3, 3])
+            object_bbox = OrientedBox(R, T, S)
+            # process seed_pts
+
+            object_model_name = f"object_{int(object_id)}"
+            object_model = self.object_models[object_model_name]
+
+
+            crop_ids = object_bbox.within(self.gauss_params["means"]).squeeze()
+            for p in GAUSS_PARAMS_LIST:
+                object_model.gauss_params[p] = self.gauss_params[p][crop_ids]
+            
+            background_mask[crop_ids] = False                
+            
+        for p in GAUSS_PARAMS_LIST:
+            self.background_model.gauss_params[p] = self.gauss_params[p][background_mask]
+
     def load_state_dict(self, dict, **kwargs):  # type: ignore
         # resize the parameters to match the new number of points
         # TODO here load different component into model
         self.step = 30000
         
         gauss_params = {}
-        for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+        for p in GAUSS_PARAMS_LIST:
             gauss_params[p] = dict[f"background_model.gauss_params.{p}"]
         self.background_model.load_state_dict(gauss_params, **kwargs)
 
@@ -348,163 +371,11 @@ class AssistGSModel(Model):
             object_model_name = f"object_{int(object_id)}"
             object_model = self.object_models[object_model_name]
             gauss_params = {}
-            for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+            for p in GAUSS_PARAMS_LIST:
                 gauss_params[p] = dict[f"object_models.{object_model_name}.gauss_params.{p}"]
             object_model.load_state_dict(gauss_params, **kwargs)
             
         self.set_all_gaussians()
-
-
-    def remove_from_optim(self, optimizer, deleted_mask, new_params):
-        """removes the deleted_mask from the optimizer provided"""
-        assert len(new_params) == 1
-        # assert isinstance(optimizer, torch.optim.Adam), "Only works with Adam"
-
-        param = optimizer.param_groups[0]["params"][0]
-        param_state = optimizer.state[param]
-        del optimizer.state[param]
-
-        # Modify the state directly without deleting and reassigning.
-        if "exp_avg" in param_state:
-            param_state["exp_avg"] = param_state["exp_avg"][~deleted_mask]
-            param_state["exp_avg_sq"] = param_state["exp_avg_sq"][~deleted_mask]
-
-        # Update the parameter in the optimizer's param group.
-        del optimizer.param_groups[0]["params"][0]
-        del optimizer.param_groups[0]["params"]
-        optimizer.param_groups[0]["params"] = new_params
-        optimizer.state[new_params[0]] = param_state
-        
-    def remove_from_all_optim(self, optimizers, deleted_mask):
-        param_groups = self.get_gaussian_param_groups()
-        for group, param in param_groups.items():
-            self.remove_from_optim(optimizers.optimizers[group], deleted_mask, param)
-        torch.cuda.empty_cache()
-        
-    def dup_in_optim(self, optimizer, dup_mask, new_params, n=2):
-        """adds the parameters to the optimizer"""
-        param = optimizer.param_groups[0]["params"][0]
-        param_state = optimizer.state[param]
-        if "exp_avg" in param_state:
-            repeat_dims = (n,) + tuple(1 for _ in range(param_state["exp_avg"].dim() - 1))
-            param_state["exp_avg"] = torch.cat(
-                [
-                    param_state["exp_avg"],
-                    torch.zeros_like(param_state["exp_avg"][dup_mask.squeeze()]).repeat(*repeat_dims),
-                ],
-                dim=0,
-            )
-            param_state["exp_avg_sq"] = torch.cat(
-                [
-                    param_state["exp_avg_sq"],
-                    torch.zeros_like(param_state["exp_avg_sq"][dup_mask.squeeze()]).repeat(*repeat_dims),
-                ],
-                dim=0,
-            )
-        del optimizer.state[param]
-        optimizer.state[new_params[0]] = param_state
-        optimizer.param_groups[0]["params"] = new_params
-        del param
-        
-    def dup_in_all_optim(self, optimizers, dup_mask, n):
-        param_groups = self.get_gaussian_param_groups()
-        for group, param in param_groups.items():
-            self.dup_in_optim(optimizers.optimizers[group], dup_mask, param, n)
-
-    def after_train(self, step: int):
-        assert step == self.step
-        # to save some training time, we no longer need to update those stats post refinement
-        if self.step >= self.config.stop_split_at:
-            return
-        with torch.no_grad():
-            # keep track of a moving average of grad norms
-            visible_mask = (self.radii > 0).flatten()
-            assert self.xys.grad is not None
-            grads = self.xys.grad.detach().norm(dim=-1)  # TODO fill in
-            # TODO (caojk) we only check the background model, maybe we should also check the object model?
-            if self.background_model.xys_grad_norm is None:
-                num_background_points = self.background_model.num_points
-                self.background_model.xys_grad_norm = grads[0:num_background_points]
-                self.background_model.vis_counts = torch.ones_like(self.background_model.xys_grad_norm)
-                object_points_total = 0
-                for object_id in range(1, self.num_objects + 1):
-                    object_model_name = f"object_{int(object_id)}"
-                    object_model = self.object_models[object_model_name]
-                    num_object_points = object_model.num_points
-                    object_model.xys_grad_norm = grads[
-                        num_background_points + object_points_total: num_background_points + object_points_total + num_object_points
-                    ]
-                    object_model.vis_counts = torch.ones_like(object_model.xys_grad_norm)
-                    object_points_total = object_points_total + num_object_points
-            else:
-                assert self.background_model.vis_counts is not None
-                num_background_points = self.background_model.num_points
-                background_visible_mask = visible_mask[0:num_background_points]
-                self.background_model.vis_counts[background_visible_mask] = self.background_model.vis_counts[background_visible_mask] + 1
-                self.background_model.xys_grad_norm[background_visible_mask] = grads[
-                    0 : num_background_points
-                ][background_visible_mask] + self.background_model.xys_grad_norm[background_visible_mask]
-
-                object_points_total = 0
-                for object_id in range(1, self.num_objects + 1):
-                    object_model_name = f"object_{int(object_id)}"
-                    object_model = self.object_models[object_model_name]
-                    num_object_points = object_model.num_points
-                    object_visible_mask = visible_mask[
-                        num_background_points + object_points_total: num_background_points + object_points_total + num_object_points
-                    ]
-                    object_grads = grads[
-                        num_background_points + object_points_total: num_background_points + object_points_total + num_object_points
-                    ]
-                    object_model.vis_counts[object_visible_mask] = object_model.vis_counts[object_visible_mask] + 1
-                    object_model.xys_grad_norm[object_visible_mask] = object_grads[object_visible_mask] + object_model.xys_grad_norm[object_visible_mask]
-                    object_points_total = object_points_total + num_object_points
-
-            # update the max screen size, as a ratio of number of pixels
-            if self.max_2Dsize is None:
-                self.max_2Dsize = torch.zeros_like(self.radii, dtype=torch.float32, device=self.device)
-                newradii = self.radii.detach()[visible_mask]
-                self.max_2Dsize[visible_mask] = torch.maximum(
-                    self.max_2Dsize[visible_mask], newradii / float(max(self.last_size[0], self.last_size[1]))
-                )
-            # here we need to update the sub-models as well
-            if self.background_model.max_2Dsize is None:
-                self.background_model.max_2Dsize = torch.zeros(self.background_model.num_points, dtype=torch.float32, device=self.device)
-                for object_id in range(1, self.num_objects + 1):
-                    object_model_name = f"object_{int(object_id)}"
-                    object_model = self.object_models[object_model_name]
-                    object_model.max_2Dsize = torch.zeros(object_model.num_points, dtype=torch.float32, device=self.device)
-            
-            # update the scene graph model
-            newradii = self.radii.detach()[visible_mask]
-            self.max_2Dsize[visible_mask] = torch.maximum(
-                self.max_2Dsize[visible_mask], newradii / float(max(self.last_size[0], self.last_size[1]))
-            )
-
-            # updat the submodels
-            num_background_points = self.background_model.num_points
-            background_visible_mask = visible_mask[0:num_background_points]
-            background_newradii = self.radii.detach()[0:num_background_points][background_visible_mask]
-            self.background_model.max_2Dsize[background_visible_mask] = torch.maximum(
-                self.background_model.max_2Dsize[background_visible_mask], background_newradii / float(max(self.last_size[0], self.last_size[1]))
-            )
-
-            object_points_total = 0
-            for object_id in range(1, self.num_objects + 1):
-                object_model_name = f"object_{int(object_id)}"
-                object_model = self.object_models[object_model_name]
-                num_object_points = object_model.num_points
-                object_visible_mask = visible_mask[
-                    num_background_points + object_points_total: num_background_points + object_points_total + num_object_points
-                ]
-                object_newradii = self.radii.detach()[
-                    num_background_points + object_points_total: num_background_points + object_points_total + num_object_points
-                ][object_visible_mask]
-                object_model.max_2Dsize[object_visible_mask] = torch.maximum(
-                    object_model.max_2Dsize[object_visible_mask], object_newradii / float(max(self.last_size[0], self.last_size[1]))
-                )
-                object_points_total = object_points_total + num_object_points
-
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -513,205 +384,12 @@ class AssistGSModel(Model):
         assert back_color.shape == (3,)
         self.back_color = back_color
 
-    def refinement_after(self, optimizers: Optimizers, step: int):
-        assert step == self.step
-        if self.step <= self.config.warmup_length:
-            return
-        with torch.no_grad():
-            # only split/cull if we've seen every image since opacity reset
-            reset_interval = self.config.reset_alpha_every * self.config.refine_every
-            do_densification = (
-                self.step < self.config.stop_split_at
-                and self.step % reset_interval > self.num_train_data + self.config.refine_every
-            )
-            if do_densification:
-                # then we densify
-                assert (
-                    self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
-                )
-                avg_grad_norm = (
-                    (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
-                )
-                high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
-                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
-                if self.step < self.config.stop_screen_size_at:
-                    splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
-                splits &= high_grads
-                nsamps = self.config.n_split_samples
-                split_params = self.split_gaussians(splits, nsamps)
-
-                dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh).squeeze()
-                dups &= high_grads
-                dup_params = self.dup_gaussians(dups)
-                for name, param in self.gauss_params.items():
-                    self.gauss_params[name] = torch.nn.Parameter(
-                        torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
-                    )
-
-                # append zeros to the max_2Dsize tensor
-                self.max_2Dsize = torch.cat(
-                    [
-                        self.max_2Dsize,
-                        torch.zeros_like(split_params["scales"][:, 0]),
-                        torch.zeros_like(dup_params["scales"][:, 0]),
-                    ],
-                    dim=0,
-                )
-                
-                split_idcs = torch.where(splits)[0]
-                self.dup_in_all_optim(optimizers, split_idcs, nsamps)
-                
-                dup_idcs = torch.where(dups)[0]
-                self.dup_in_all_optim(optimizers, dup_idcs, 1)  
-
-                splits_mask = torch.cat(
-                    (
-                        splits,
-                        torch.zeros(
-                            nsamps * splits.sum() + dups.sum(),
-                            device=self.device,
-                            dtype=torch.bool,
-                        ),
-                    )
-                )
-
-                deleted_mask = self.cull_gaussians(splits_mask)
-            elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
-                deleted_mask = self.cull_gaussians()
-            else:
-                # if we donot allow culling post refinement, no more gaussians will be pruned.
-                deleted_mask = None
-                
-            if deleted_mask is not None:
-                self.remove_from_all_optim(optimizers, deleted_mask)
-
-            if self.step < self.config.stop_split_at and self.step % reset_interval == self.config.refine_every:
-                reset_value = self.config.cull_alpha_thresh * 2.0
-                self.background_model.opacities.data = torch.clamp(
-                    self.background_model.opacities.data,
-                    max=torch.logit(torch.tensor(reset_value, device=self.device)).item(),
-                )
-                
-                for object_id in range(1, self.num_objects + 1):
-                    object_model_name = f"object_{int(object_id)}"
-                    object_model = self.object_models[object_model_name]
-                    object_model.opacities.data = torch.clamp(
-                        object_model.opacities.data,
-                        max=torch.logit(torch.tensor(reset_value, device=self.device)).item(),
-                    )
-                    
-                # reset the exp of optimizer
-                background_optim = optimizers.optimizers["background_opacity"]
-                background_param = background_optim.param_groups[0]["params"][0]
-                background_param_state = background_optim.state[background_param]
-                background_param_state["exp_avg"] = torch.zeros_like(background_param_state["exp_avg"])
-                background_param_state["exp_avg_sq"] = torch.zeros_like(background_param_state["exp_avg_sq"])
-                for object_id in range(1, self.num_objects + 1):
-                    object_optim = optimizers.optimizers[f"object_{int(object_id)}_opacity"]
-                    object_param = object_optim.param_groups[0]["params"][0]
-                    object_param_state = object_optim.state[object_param]
-                    object_param_state["exp_avg"] = torch.zeros_like(object_param_state["exp_avg"])
-                    object_param_state["exp_avg_sq"] = torch.zeros_like(object_param_state["exp_avg_sq"])
-            # set scene graph model
-            self.xys_grad_norm = None
-            self.vis_counts = None
-            self.max_2Dsize = None
-            # set background model and object model
-            self.background_model.xys_grad_norm = None
-            self.background_model.vis_counts = None
-            self.background_model.max_2Dsize = None
-            for object_id in range(1, self.num_objects + 1):
-                object_model_name = f"object_{int(object_id)}"
-                object_model = self.object_models[object_model_name]
-                object_model.xys_grad_norm = None
-                object_model.vis_counts = None
-                object_model.max_2Dsize = None
-
-    def cull_gaussians(self, extra_cull_mask: Optional[torch.Tensor] = None):
-        """
-        This function deletes gaussians with under a certain opacity threshold
-        extra_cull_mask: a mask indicates extra gaussians to cull besides existing culling criterion
-        """
-        n_bef = self.num_points
-        # cull transparent ones
-        culls = (torch.sigmoid(self.opacities) < self.config.cull_alpha_thresh).squeeze()
-        below_alpha_count = torch.sum(culls).item()
-        toobigs_count = 0
-        if extra_cull_mask is not None:
-            culls = culls | extra_cull_mask
-        if self.step > self.config.refine_every * self.config.reset_alpha_every:
-            # cull huge ones
-            toobigs = (torch.exp(self.scales).max(dim=-1).values > self.config.cull_scale_thresh).squeeze()
-            if self.step < self.config.stop_screen_size_at:
-                # cull big screen space
-                assert self.max_2Dsize is not None
-                toobigs = toobigs | (self.max_2Dsize > self.config.cull_screen_size).squeeze()
-            culls = culls | toobigs
-            toobigs_count = torch.sum(toobigs).item()
-        for name, param in self.gauss_params.items():
-            self.gauss_params[name] = torch.nn.Parameter(param[~culls])
-
-        CONSOLE.log(
-            f"Culled {n_bef - self.num_points} gaussians "
-            f"({below_alpha_count} below alpha thresh, {toobigs_count} too bigs, {self.num_points} remaining)"
-        )
-
-        return culls
-
-    def split_gaussians(self, split_mask, samps):
-        """
-        This function splits gaussians that are too large
-        """
-        n_splits = split_mask.sum().item()
-        CONSOLE.log(f"Splitting {split_mask.sum().item()/self.num_points} gaussians: {n_splits}/{self.num_points}")
-        centered_samples = torch.randn((samps * n_splits, 3), device=self.device)  # Nx3 of axis-aligned scales
-        scaled_samples = (
-            torch.exp(self.scales[split_mask].repeat(samps, 1)) * centered_samples
-        )  # how these scales are rotated
-        quats = self.quats[split_mask] / self.quats[split_mask].norm(dim=-1, keepdim=True)  # normalize them first
-        rots = quat_to_rotmat(quats.repeat(samps, 1))  # how these scales are rotated
-        rotated_samples = torch.bmm(rots, scaled_samples[..., None]).squeeze()
-        new_means = rotated_samples + self.means[split_mask].repeat(samps, 1)
-        # step 2, sample new colors
-        new_features_dc = self.features_dc[split_mask].repeat(samps, 1)
-        new_features_rest = self.features_rest[split_mask].repeat(samps, 1, 1)
-        # step 3, sample new opacities
-        new_opacities = self.opacities[split_mask].repeat(samps, 1)
-        # step 4, sample new scales
-        size_fac = 1.6
-        new_scales = torch.log(torch.exp(self.scales[split_mask]) / size_fac).repeat(samps, 1)
-        self.scales[split_mask] = torch.log(torch.exp(self.scales[split_mask]) / size_fac)
-        # step 5, sample new quats
-        new_quats = self.quats[split_mask].repeat(samps, 1)
-        out = {
-            "means": new_means,
-            "features_dc": new_features_dc,
-            "features_rest": new_features_rest,
-            "opacities": new_opacities,
-            "scales": new_scales,
-            "quats": new_quats,
-        }
-        for name, param in self.gauss_params.items():
-            if name not in out:
-                out[name] = param[split_mask].repeat(samps, 1)
-        return out
-
-    def dup_gaussians(self, dup_mask):
-        """
-        This function duplicates gaussians that are too small
-        """
-        n_dups = dup_mask.sum().item()
-        CONSOLE.log(f"Duplicating {dup_mask.sum().item()/self.num_points} gaussians: {n_dups}/{self.num_points}")
-        new_dups = {}
-        for name, param in self.gauss_params.items():
-            new_dups[name] = param[dup_mask]
-        return new_dups
-
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         cbs = []
-
+        if self.step % 5000 == 0:
+            self.reset_assistgs_model()
         # TODO (caojk) maybe it is faster to change the callback method into parallel?
         # in a single method instead of a "for" iteration
         cbs.append(
@@ -774,13 +452,13 @@ class AssistGSModel(Model):
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         
         param_groups = {}
-        for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+        for name in GAUSS_PARAMS_LIST:
             param_groups[f"background_{name}"] = [self.background_model.gauss_params[name]]
         for object_id in range(1, self.num_objects + 1):
             
             object_model_name = f"object_{int(object_id)}"
             object_model = self.object_models[object_model_name]
-            for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+            for name in GAUSS_PARAMS_LIST:
                 param_groups[f"object_{int(object_id)}_{name}"] = [object_model.gauss_params[name]]
         return param_groups
 
@@ -801,7 +479,7 @@ class AssistGSModel(Model):
     
     def set_all_gaussians(self):
         param_groups = {}
-        for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+        for name in GAUSS_PARAMS_LIST:
             param_groups[name] = [self.background_model.gauss_params[name]]
         
 
@@ -810,10 +488,10 @@ class AssistGSModel(Model):
             object_model_name = f"object_{int(object_id)}"
             object_model = self.object_models[object_model_name]
             
-            for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+            for name in GAUSS_PARAMS_LIST:
                 param_groups[name].append(object_model.gauss_params[name])
         
-        for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+        for name in GAUSS_PARAMS_LIST:
             param_groups[name] = torch.cat(param_groups[name], dim=0)
         
         self.gauss_params = param_groups
